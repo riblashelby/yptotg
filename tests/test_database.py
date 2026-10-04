@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -29,7 +29,8 @@ async def test_create_and_finish_session(db):
 
     await db_api.finish_session(db, session_id, NOW + 3600)
     cursor = await db.execute("SELECT end_ts FROM sessions WHERE id = ?", (session_id,))
-    assert await cursor.fetchone() == {"end_ts": NOW + 3600}
+    row = await cursor.fetchone()
+    assert row["end_ts"] == NOW + 3600
 
 
 async def test_get_day_totals_groups_by_subject(db):
@@ -55,12 +56,12 @@ async def test_get_day_totals_subtracts_paused_time(db):
 
 
 async def test_get_day_totals_excludes_other_days_and_open_sessions(db):
-    yesterday = date.today() - timedelta(days=1)
-    old_ts = time.time() - 86_400 * 2
+    now = time.time()
+    yesterday = datetime.fromtimestamp(now).date() - timedelta(days=1)
 
-    sid = await db_api.create_session(db, "Math", old_ts)
-    await db_api.finish_session(db, sid, old_ts + 600)          # finished yesterday
-    await db_api.create_session(db, "Code", time.time())         # still open today
+    sid = await db_api.create_session(db, "Math", now - 86_400)
+    await db_api.finish_session(db, sid, now - 86_400 + 600)     # finished yesterday
+    await db_api.create_session(db, "Code", now)                  # still open today
 
     assert await db_api.get_day_totals(db, date.today()) == {}
     assert (await db_api.get_day_totals(db, yesterday)).get("Math") == pytest.approx(600.0)

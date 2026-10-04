@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: study-timer
+    restart: unless-stopped
+    env_file: .env                       # single source of truth
+    environment:                         # force DB + TZ inside the container
+      DB_PATH: /data/study_timer.db
+      TZ: ${TZ:-UTC}                     # keeps REPORT_TIME local-time accurate
+    volumes:
+      - bot_data:/data                   # aiosqlite file survives rebuilds
+
+volumes:
+  bot_data:

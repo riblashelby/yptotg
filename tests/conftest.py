@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 import pytest
-from pydantic import ConfigDict
+from pydantic import ConfigDict, PrivateAttr
 
 from aiogram.types import CallbackQuery, Chat, Message, User
 
@@ -22,6 +22,8 @@ CHANNEL_ID = -1001111111111
 
 class MockBot:
     """Stands in for aiogram Bot: records method calls, never touches the network."""
+
+    model = "mock"  # aiogram's CallbackQuery.answer() accesses bot.session.bot.model
 
     def __init__(self, conn: Any) -> None:
         self.db = conn
@@ -73,55 +75,65 @@ class Recorder:
         self.calls.append((kind, args, kwargs))
 
 
-class RecordingMessage(Message):
-    """aiogram models are frozen pydantic classes — subclass to override methods."""
+class TelegramTestMixin:
+    """aiogram reads the bot off the private `_bot` attr — wire it for frozen models."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    recorder: Recorder = Recorder()
-
-    async def answer(self, text: str, **kwargs: Any) -> "RecordingMessage":
-        self.recorder.record("answer", text, **kwargs)
+    def bind_bot(self, bot: MockBot) -> "TelegramTestMixin":
+        object.__setattr__(self, "_bot", bot)  # frozen-safe assignment
         return self
 
 
-class RecordingCallback(CallbackQuery):
-    """CallbackQuery whose answer/edit responses are recorded."""
+class RecordingMessage(TelegramTestMixin, Message):
+    """aiogram models are frozen pydantic classes — declare recorder as PrivateAttr."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    recorder: Recorder = Recorder()
+    _recorder: Recorder = PrivateAttr(default_factory=Recorder)
 
-    async def answer(self, text: str = "", **kwargs: Any) -> bool:
-        self.recorder.record("callback_answer", text, **kwargs)
+    def bind_recorder(self, recorder: Recorder) -> "RecordingMessage":
+        self._recorder = recorder
+        return self
+
+    async def answer(self, text: str, **kwargs: Any) -> "RecordingMessage":
+        self._recorder.record("answer", text, **kwargs)
+        return self
+
+    async def edit_text(self, text: str, **kwargs: Any) -> "RecordingMessage":
+        self._recorder.record("edit_text", text, **kwargs)
+        return self
+
+
+class RecordingCallback(TelegramTestMixin, CallbackQuery):
+    """CallbackQuery whose answer responses are recorded."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    _recorder: Recorder = PrivateAttr(default_factory=Recorder)
+
+    def bind_recorder(self, recorder: Recorder) -> "RecordingCallback":
+        self._recorder = recorder
+        return self
+
+    async def answer(self, text: str = "", show_alert: bool = False, **kwargs: Any) -> bool:
+        self._recorder.record("callback_answer", text, show_alert=show_alert, **kwargs)
         return True
 
 
 def make_message(bot: MockBot, user_id: int = ADMIN_ID, text: str = "/start") -> RecordingMessage:
-    message = RecordingMessage(
+    return RecordingMessage(
         message_id=1,
         date=datetime.now(timezone.utc),
         chat=Chat(id=user_id, type="private"),
         from_user=make_user(user_id),
         text=text,
         bot=bot,  # type: ignore[arg-type]
-        recorder=bot.recorder,
-    )
-    return message
+    ).bind_recorder(bot.recorder)
 
 
 def make_callback(bot: MockBot, data: str, user_id: int = ADMIN_ID) -> RecordingCallback:
-    message = make_message(bot, user_id=user_id)
-
-    async def edit_text(text: str, **kwargs: Any) -> RecordingMessage:
-        bot.recorder.record("edit_text", text, **kwargs)
-        return message
-
-    message.edit_text = edit_text  # allowed: subclass instances keep a mutable __dict__
     return RecordingCallback(
         id="callback-id",
         from_user=make_user(user_id),
         chat_instance="instance",
         data=data,
-        message=message,
+        message=make_message(bot, user_id=user_id),
         bot=bot,  # type: ignore[arg-type]
-        recorder=bot.recorder,
-    )
+    ).bind_recorder(bot.recorder)

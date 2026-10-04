@@ -9,7 +9,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """All bot configuration lives in exactly one `.env` file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+        case_sensitive=False, extra="ignore",  # docker-compose passes vars UPPERCASE
+    )
 
     bot_token: str
     admin_id: int
