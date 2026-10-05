@@ -66,25 +66,38 @@ def build_session(proxy_url: str | None) -> BaseSession:
     return ProxiedSession(proxy_url)
 
 
-async def preflight(session: BaseSession, proxy_url: str | None) -> None:
-    """Fail fast *before* any API call: TCP-reachability + DNS of the proxy host."""
+def parse_proxy_host(proxy_url: str) -> tuple[str, int]:
+    """Extract (host, port) from a proxy URL like socks5://[user:pass@]host:1080."""
+    tail = proxy_url.rsplit("@", 1)[-1].rsplit("://", 1)[-1]
+    host, _, port = tail.partition(":")
+    return host, int(port) if port else 1080
+
+
+async def preflight(session: BaseSession, proxy_url: str | None) -> bool:
+    """Best-effort reachability probe. NEVER crashes startup — returns False instead.
+
+    Polling retries connections on its own forever, so a failed probe only means
+    "log a hint now"; the bot still starts and self-heals once the proxy is back.
+    """
     if not proxy_url:
-        return
+        return True
+    host, port = parse_proxy_host(proxy_url)
     try:
-        _, host_port = proxy_url.rsplit("@", 1)[-1].rsplit("://", 1)
-        host, _, port = host_port.partition(":")
         loop = asyncio.get_running_loop()
-        await asyncio.wait_for(loop.getaddrinfo(host, int(port or 1080)), timeout=5)
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port or 1080)), timeout=5)
+        await asyncio.wait_for(loop.getaddrinfo(host, port), timeout=5)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
         writer.close()
-        log.info("Proxy preflight OK: %s:%s", host, port or 1080)
+        await writer.wait_closed()
+        log.info("Proxy preflight OK: %s:%s", host, port)
+        return True
     except (OSError, asyncio.TimeoutError, ValueError) as exc:
-        await session.close()
-        raise SystemExit(
-            f"❌ Proxy {proxy_url} unreachable ({exc!r}).\n"
-            f"   Fix the network wiring — see README 'Proxy troubleshooting':"
-            f" docker network connect <bot-network> xray-proxy\n"
-        ) from exc
+        log.warning(
+            "⚠️  Proxy %s:%s not reachable yet (%r). Starting anyway — polling will retry.\n"
+            "    If this persists, re-attach the proxy container to the bot's network:\n"
+            "    docker network connect study-bot-net xray-proxy",
+            host, port, exc,
+        )
+        return False
 
 
 def build_bot(settings: Settings) -> Bot:
@@ -120,21 +133,54 @@ async def daily_report_loop(bot: Any, db: Any, settings: Settings) -> None:
         await asyncio.sleep(61)  # drift guard: never double-fire in the same minute
 
 
-async def startup_guard(bot: Bot, settings: Settings) -> None:
-    """Pre-flight connectivity check with a human-readable diagnosis on failure."""
+async def startup_guard(bot: Bot, settings: Settings) -> bool:
+    """Pre-flight API check. Non-fatal: logs a diagnosis and lets polling retry."""
     try:
         await bot.get_me()
         log.info("Telegram API reachable ✅")
+        return True
     except Exception as exc:
-        reason = str(exc)
-        hint = ""
-        if "certificate" in reason.lower() or "ssl" in reason.lower():
-            hint = "\n   Likely a TLS/CA issue — run WITHOUT proxy: PROXY_URL= in .env"
-        elif "timeout" in reason.lower() or "connect" in reason.lower():
-            host = (settings.proxy_url or "").rsplit("@", 1)[-1].rsplit("://", 1)[-1]
-            hint = f"\n   Network path to Telegram is broken via {host or 'direct'}." \
-                   f"\n   If using xray-proxy: docker network connect study-bot-net xray-proxy"
-        raise SystemExit(f"❌ Cannot reach Telegram API: {reason}{hint}") from exc
+        reason = str(exc).lower()
+        if "certificate" in reason or "ssl" in reason:
+            hint = "TLS/CA issue — try running WITHOUT proxy: PROXY_URL= in .env"
+        elif "timeout" in reason or "connect" in reason:
+            host, port = parse_proxy_host(settings.proxy_url or "")
+            hint = (
+                f"Network path to Telegram broken via {host}:{port}. Re-attach the proxy:\n"
+                f"    docker network connect study-bot-net xray-proxy\n"
+                f"  …or go direct: set PROXY_URL= (empty) in .env"
+            )
+        else:
+            hint = "Will keep retrying via polling."
+        log.warning("⚠️  Telegram API not reachable yet: %s. %s", exc, hint)
+        return False
+
+
+async def resilient_startup(bot: Bot, settings: Settings) -> None:
+    """Retry the two cheap startup calls until they succeed — but NEVER crash.
+
+    aiogram's polling loop reconnects on its own; these calls only make the bot
+    look polished (menu commands) and confirm connectivity in the logs.
+    """
+    while True:
+        ok_api = await startup_guard(bot, settings)
+        try:
+            await bot.set_my_commands(
+                [
+                    BotCommand(command="start", description="Start focusing"),
+                    BotCommand(command="subjects", description="Add / rename subjects"),
+                    BotCommand(command="addsubject", description="Add a subject: /addsubject Physics"),
+                    BotCommand(command="renamesubject", description="Rename: /renamesubject <id> <New Name>"),
+                ],
+                request_timeout=30,
+            )
+            ok_cmd = True
+        except Exception as exc:
+            log.warning("set_my_commands failed (ignored): %s", exc)
+            ok_cmd = False
+        if ok_api and ok_cmd:
+            return
+        await asyncio.sleep(15)
 
 
 async def main() -> None:
@@ -146,8 +192,7 @@ async def main() -> None:
         os.environ.pop(var, None)
 
     bot = build_bot(settings)
-    await preflight(bot.session, settings.proxy_url)
-    await startup_guard(bot, settings)
+    await preflight(bot.session, settings.proxy_url)  # advisory only — never raises
 
     db = await db_api.init_db(settings.db_path)
     bot.db = db  # single-connection app; handlers read it off the bot for easy mocking
@@ -156,19 +201,15 @@ async def main() -> None:
     dp.update.outer_middleware(AdminOnlyMiddleware(settings.admin_id))
     dp.include_router(router)
 
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Start focusing"),
-        BotCommand(command="subjects", description="Add / rename subjects"),
-        BotCommand(command="addsubject", description="Add a subject: /addsubject Physics"),
-        BotCommand(command="renamesubject", description="Rename: /renamesubject <id> <New Name>"),
-    ])
     log.info("Study bot online for admin %s", settings.admin_id)
 
     report_task = asyncio.create_task(daily_report_loop(bot, db, settings))
+    startup_task = asyncio.create_task(resilient_startup(bot, settings))
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
+        startup_task.cancel()
         report_task.cancel()
         await db.close()
         await bot.session.close()
