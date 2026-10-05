@@ -20,7 +20,7 @@ def make_settings(**overrides) -> Settings:
 
 async def test_send_daily_report_posts_totals_to_channel(db, mock_bot):
     now = time.time()
-    ids = dict(await db_api.list_subjects(db))
+    ids = {name: sid for sid, name in await db_api.list_subjects(db)}
     for subject, seconds in [("Math", 5400), ("Code", 1800)]:
         sid = await db_api.create_session(db, ids[subject], now - seconds)
         await db_api.finish_session(db, sid, now)

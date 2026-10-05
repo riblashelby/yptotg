@@ -120,7 +120,10 @@ async def cb_start(callback: CallbackQuery) -> None:
     subject = await db_api.get_subject(callback.bot.db, int(raw_id))
     if subject is None:
         await callback.answer("Subject was removed — pick another 🙃", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=await _subjects_markup(callback))
+        # Stale inline keyboard: edit it in place (works in any chat type).
+        await callback.message.edit_reply_markup(
+            reply_markup=await _subjects_markup(callback)
+        )
         return
     subject_id, name = subject
 

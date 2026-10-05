@@ -50,18 +50,16 @@ def test_build_bot_without_proxy_has_default_session() -> None:
 
 
 def test_build_session_without_proxy_is_plain_aiohttp() -> None:
-    """No PROXY_URL → direct AiohttpSession with a hardened (certifi) SSL context."""
+    """No PROXY_URL → plain AiohttpSession (certifi CA bundle is aiogram's default)."""
     session = bot_module.build_session(None)
     from aiogram.client.session.aiohttp import AiohttpSession
     assert isinstance(session, AiohttpSession)
     assert not isinstance(session, bot_module.ProxiedSession)
-    assert session.ssl_context is not None
+    assert session._connector_init.get("ssl") is not None  # TLS hardened out of the box
 
 
 def test_preflight_fails_fast_on_unreachable_proxy() -> None:
     """Unresolvable proxy host → SystemExit with actionable hint, never a hang."""
-    import asyncio
-
     async def boom() -> None:
         session = bot_module.build_session("socks5://no-such-host.invalid:1080")
         await bot_module.preflight(session, "socks5://no-such-host.invalid:1080")

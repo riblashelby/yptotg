@@ -123,23 +123,27 @@ class RecordingCallback(TelegramTestMixin, CallbackQuery):
         return True
 
 
-def make_message(bot: MockBot, user_id: int = ADMIN_ID, text: str = "/start") -> RecordingMessage:
+def make_message(
+    bot: MockBot, user_id: int = ADMIN_ID, text: str = "/start", chat_type: str = "private"
+) -> RecordingMessage:
     # aiogram 3.31+ resolves `obj.bot` from model *context* — the plain `bot=`
     # kwarg is silently ignored, so bind explicitly with `.as_(bot)`.
     return RecordingMessage(
         message_id=1,
         date=datetime.now(timezone.utc),
-        chat=Chat(id=user_id, type="private"),
+        chat=Chat(id=user_id, type=chat_type),
         from_user=make_user(user_id),
         text=text,
     ).as_(bot).bind_recorder(bot.recorder)  # type: ignore[arg-type]
 
 
-def make_callback(bot: MockBot, data: str, user_id: int = ADMIN_ID) -> RecordingCallback:
+def make_callback(
+    bot: MockBot, data: str, user_id: int = ADMIN_ID, chat_type: str = "private"
+) -> RecordingCallback:
     return RecordingCallback(
         id="callback-id",
         from_user=make_user(user_id),
         chat_instance="instance",
         data=data,
-        message=make_message(bot, user_id=user_id),
+        message=make_message(bot, user_id=user_id, text="", chat_type=chat_type),
     ).as_(bot).bind_recorder(bot.recorder)  # type: ignore[arg-type]

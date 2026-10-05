@@ -53,7 +53,7 @@ async def test_rename_subject_updates_label_everywhere(db):
 
 
 async def test_rename_subject_errors(db):
-    sid, _ = await db_api.list_subjects(db)[0]
+    sid, _ = (await db_api.list_subjects(db))[0]
     other_sid, _ = await db_api.add_subject(db, "Chemistry")
     with pytest.raises(ValueError):          # duplicate name
         await db_api.rename_subject(db, sid, "chemistry")
@@ -88,7 +88,7 @@ async def test_get_day_totals_groups_by_subject(db):
     today = date.today()
     now = time.time()
 
-    ids = dict(await db_api.list_subjects(db))
+    ids = {name: sid for sid, name in await db_api.list_subjects(db)}
     for subject, seconds in [("Math", 1800), ("Math", 600), ("Code", 3600)]:
         sid = await db_api.create_session(db, ids[subject], now - seconds)
         await db_api.finish_session(db, sid, now)
@@ -122,7 +122,7 @@ async def test_get_day_totals_subtracts_paused_time(db):
 async def test_get_day_totals_excludes_other_days_and_open_sessions(db):
     now = time.time()
     yesterday = datetime.fromtimestamp(now).date() - timedelta(days=1)
-    ids = dict(await db_api.list_subjects(db))
+    ids = {name: sid for sid, name in await db_api.list_subjects(db)}
 
     sid = await db_api.create_session(db, ids["Math"], now - 86_400)
     await db_api.finish_session(db, sid, now - 86_400 + 600)   # finished yesterday
@@ -156,7 +156,7 @@ async def test_active_lifecycle(db):
 
 async def test_start_active_replaces_previous_row(db):
     """Upsert semantics: one live timer per chat, ever."""
-    ids = dict(await db_api.list_subjects(db))
+    ids = {name: sid for sid, name in await db_api.list_subjects(db)}
     sid1 = await db_api.create_session(db, ids["Math"], NOW)
     await db_api.start_active(db, 42, sid1, ids["Math"], NOW)
     sid2 = await db_api.create_session(db, ids["Code"], NOW + 10)

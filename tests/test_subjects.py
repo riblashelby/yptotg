@@ -143,7 +143,7 @@ async def test_migrate_preserves_history_and_live_timer(legacy_db):
     await migrate(legacy_db)
     await migrate(legacy_db)  # idempotent — second run is a no-op
 
-    names = dict(await db_api.list_subjects(legacy_db))
+    names = {name for _, name in await db_api.list_subjects(legacy_db)}
     assert {"Korean", "Physics", "Math"} <= set(names)          # history + live name kept
 
     cursor = await legacy_db.execute(

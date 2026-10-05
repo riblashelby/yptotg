@@ -30,40 +30,33 @@ log = logging.getLogger("study-bot")
 
 
 class ProxiedSession(AiohttpSession):
-    """AiohttpSession with a SOCKS5/HTTP connector injected the supported way.
+    """AiohttpSession forced onto a SOCKS5/HTTP proxy connector.
 
     Passing ``connector=`` to the constructor is forbidden by aiogram
     (``BaseSession.__init__() got an unexpected keyword argument 'connector'``
     — the crash that killed earlier deployments). The supported extension
-    point is overriding ``create_connector()``, which works on every
-    aiogram 3.x build regardless of its native ``proxy=`` support.
+    point: rewrite ``_connector_type/_connector_init`` *after* construction —
+    exactly what aiogram's own ``proxy=`` kwarg does internally, but version-
+    proof on every aiogram 3.x build.
     """
 
     def __init__(self, proxy_url: str, **kwargs: Any) -> None:
-        self._proxy_url = proxy_url
         super().__init__(**kwargs)
+        from aiohttp_socks import ProxyConnector
 
-    async def create_connector(self) -> ProxyConnector:  # type: ignore[override]
-        return ProxyConnector.from_url(self._proxy_url)
+        self._connector_type = ProxyConnector
+        self._connector_init = {"url": proxy_url}
+        self._should_reset_connector = True
 
 
 def build_session(proxy_url: str | None) -> BaseSession:
-    """Session factory: plain HTTPS (with hardened TLS) or SOCKS5 via override.
+    """Session factory.
 
-    NOTE: aiogram 3.31's ``AiohttpSession.__init__`` forwards **kwargs straight to
-    ``BaseSession`` — passing ``ssl_context=`` there raises TypeError just like the
-    old ``connector=`` crash. The safe path: construct plainly, then swap in a
-    certifi-backed SSL context on the instance after construction.
+    Direct mode returns a plain ``AiohttpSession`` — aiogram 3.31 already pins
+    the certifi CA bundle itself, so TLS works on slim images out of the box.
+    Proxy mode returns :class:`ProxiedSession` (connector rewritten post-init).
     """
-    if not proxy_url:
-        session = AiohttpSession()
-        try:
-            import certifi
-            session.ssl = ssl.create_default_context(cafile=certifi.where())
-        except Exception:  # pragma: no cover - certifi ships with aiohttp anyway
-            pass
-        return session
-    return ProxiedSession(proxy_url)
+    return ProxiedSession(proxy_url) if proxy_url else AiohttpSession()
 
 
 def parse_proxy_host(proxy_url: str) -> tuple[str, int]:
@@ -73,31 +66,36 @@ def parse_proxy_host(proxy_url: str) -> tuple[str, int]:
     return host, int(port) if port else 1080
 
 
-async def preflight(session: BaseSession, proxy_url: str | None) -> bool:
-    """Best-effort reachability probe. NEVER crashes startup — returns False instead.
+def proxy_hint(host: str, port: int) -> str:
+    return (
+        f"  1) docker ps -a | grep xray-proxy          # proxy container running?\n"
+        f"  2) docker network connect study-bot-net xray-proxy   # DNS broke after 'down'\n"
+        f"  3) test it yourself:\n"
+        f"       docker exec study-timer python -c \"import socket;"
+        f"socket.create_connection(('{host}',{port}),5);print('PROXY OK')\"\n"
+        f"  4) go direct (if your server reaches Telegram without a proxy):"
+        f" set PROXY_URL= in .env and restart"
+    )
 
-    Polling retries connections on its own forever, so a failed probe only means
-    "log a hint now"; the bot still starts and self-heals once the proxy is back.
+
+async def preflight(session: BaseSession, proxy_url: str | None) -> bool:
+    """TCP probe of the configured proxy. Fail-fast: exit(1) with actionable hints.
+
+    A dead proxy otherwise turns every API call into a silent hang/timeout loop;
+    crashing immediately (and letting the restart policy retry) surfaces the real
+    problem in the logs instead.
     """
     if not proxy_url:
         return True
     host, port = parse_proxy_host(proxy_url)
     try:
-        loop = asyncio.get_running_loop()
-        await asyncio.wait_for(loop.getaddrinfo(host, port), timeout=5)
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
-        writer.close()
-        await writer.wait_closed()
-        log.info("Proxy preflight OK: %s:%s", host, port)
-        return True
     except (OSError, asyncio.TimeoutError, ValueError) as exc:
-        log.warning(
-            "⚠️  Proxy %s:%s not reachable yet (%r). Starting anyway — polling will retry.\n"
-            "    If this persists, re-attach the proxy container to the bot's network:\n"
-            "    docker network connect study-bot-net xray-proxy",
-            host, port, exc,
-        )
-        return False
+        raise SystemExit(f"Proxy {host}:{port} unreachable ({exc!r}) — aborting.\n{proxy_hint(host, port)}")
+    writer.close()
+    await writer.wait_closed()
+    log.info("Proxy preflight OK: %s:%s", host, port)
+    return True
 
 
 def build_bot(settings: Settings) -> Bot:
@@ -133,38 +131,16 @@ async def daily_report_loop(bot: Any, db: Any, settings: Settings) -> None:
         await asyncio.sleep(61)  # drift guard: never double-fire in the same minute
 
 
-async def startup_guard(bot: Bot, settings: Settings) -> bool:
-    """Pre-flight API check. Non-fatal: logs a diagnosis and lets polling retry."""
-    try:
-        await bot.get_me()
-        log.info("Telegram API reachable ✅")
-        return True
-    except Exception as exc:
-        reason = str(exc).lower()
-        if "certificate" in reason or "ssl" in reason:
-            hint = "TLS/CA issue — try running WITHOUT proxy: PROXY_URL= in .env"
-        elif "timeout" in reason or "connect" in reason:
-            host, port = parse_proxy_host(settings.proxy_url or "")
-            hint = (
-                f"Network path to Telegram broken via {host}:{port}. Re-attach the proxy:\n"
-                f"    docker network connect study-bot-net xray-proxy\n"
-                f"  …or go direct: set PROXY_URL= (empty) in .env"
-            )
-        else:
-            hint = "Will keep retrying via polling."
-        log.warning("⚠️  Telegram API not reachable yet: %s. %s", exc, hint)
-        return False
-
-
 async def resilient_startup(bot: Bot, settings: Settings) -> None:
-    """Retry the two cheap startup calls until they succeed — but NEVER crash.
+    """Retry the cosmetic startup calls until they succeed — never crash.
 
     aiogram's polling loop reconnects on its own; these calls only make the bot
-    look polished (menu commands) and confirm connectivity in the logs.
+    look polished (menu commands). ``delete_webhook`` is folded in here so a
+    transient proxy/API hiccup can't kill startup outright.
     """
     while True:
-        ok_api = await startup_guard(bot, settings)
         try:
+            await bot.delete_webhook(drop_pending_updates=True)
             await bot.set_my_commands(
                 [
                     BotCommand(command="start", description="Start focusing"),
@@ -174,13 +150,11 @@ async def resilient_startup(bot: Bot, settings: Settings) -> None:
                 ],
                 request_timeout=30,
             )
-            ok_cmd = True
-        except Exception as exc:
-            log.warning("set_my_commands failed (ignored): %s", exc)
-            ok_cmd = False
-        if ok_api and ok_cmd:
+            log.info("Telegram API reachable ✅ · menu commands set")
             return
-        await asyncio.sleep(15)
+        except Exception as exc:  # keep trying; polling self-heals regardless
+            log.warning("Startup API check failed, retrying in 15s: %s", exc)
+            await asyncio.sleep(15)
 
 
 async def main() -> None:
@@ -192,7 +166,7 @@ async def main() -> None:
         os.environ.pop(var, None)
 
     bot = build_bot(settings)
-    await preflight(bot.session, settings.proxy_url)  # advisory only — never raises
+    await preflight(bot.session, settings.proxy_url)  # fail-fast with hints if proxy is dead
 
     db = await db_api.init_db(settings.db_path)
     bot.db = db  # single-connection app; handlers read it off the bot for easy mocking
@@ -206,8 +180,7 @@ async def main() -> None:
     report_task = asyncio.create_task(daily_report_loop(bot, db, settings))
     startup_task = asyncio.create_task(resilient_startup(bot, settings))
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
+        await dp.start_polling(bot)  # retries the network forever on its own
     finally:
         startup_task.cancel()
         report_task.cancel()

@@ -1,2 +1,10 @@
+# Compiled/Binary files
 __pycache__/
 *.pyc
+
+# Editor/IDE files
+.vscode/
+.idea/
+
+# System/Environment files
+.env
