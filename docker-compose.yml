@@ -12,6 +12,14 @@ services:
       # The bot reads exactly one var from .env: PROXY_URL (e.g. socks5://xray-proxy:1080)
     volumes:
       - bot_data:/data                   # aiosqlite file survives rebuilds
+    networks:
+      - bot-net                          # add xray-proxy to this network too, e.g.:
+                                         #   docker network connect bot-net xray-proxy
+                                         # (or point PROXY_URL in .env at the host IP)
 
 volumes:
   bot_data:
+
+networks:
+  bot-net:
+    name: study-bot-net                  # stable name so the proxy can join it
