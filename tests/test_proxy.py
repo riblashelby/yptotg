@@ -17,13 +17,43 @@ def _settings(**overrides: object) -> Settings:
 
 
 def test_build_session_uses_connector_override() -> None:
-    """Session must inject the SOCKS connector via create_connector(), never a kwarg."""
+    """Session must carry the SOCKS ProxyConnector via _connector_type/_init."""
     from aiohttp_socks import ProxyConnector
 
     session = bot_module.build_session(PROXY)
     assert isinstance(session, bot_module.ProxiedSession)
-    connector = asyncio.run(session.create_connector())
-    assert isinstance(connector, ProxyConnector)
+    assert session._connector_type is ProxyConnector
+
+    async def _make() -> object:  # aiogram's exact construction path
+        return session._connector_type(**session._connector_init)
+    assert isinstance(asyncio.run(_make()), ProxyConnector)
+
+
+def test_connector_init_has_host_and_port() -> None:
+    """Regression for `ProxyConnector.__init__() missing 'host' and 'port'`.
+
+    The broken build stuffed ``{"url": proxy_url}`` into ``_connector_init``;
+    ProxyConnector has no ``url`` param — it needs parsed fields. This test runs
+    aiogram's exact crash line: ``self._connector_type(**self._connector_init)``.
+    """
+    from aiohttp_socks import ProxyConnector
+
+    session = bot_module.build_session(PROXY)
+    init = session._connector_init
+    assert "url" not in init
+    assert init["host"] == "xray-proxy" and init["port"] == 1080
+    assert init["rdns"] is True                       # hostname → resolve at proxy
+
+    async def _make() -> ProxyConnector:              # requires a running loop
+        return session._connector_type(**session._connector_init)
+    assert isinstance(asyncio.run(_make()), ProxyConnector)
+
+
+def test_connector_init_ip_host_disables_rdns() -> None:
+    session = bot_module.build_session("socks5://user:pw@1.2.3.4:1080")
+    init = session._connector_init
+    assert init["host"] == "1.2.3.4" and init["rdns"] is False
+    assert init["username"] == "user" and init["password"] == "pw"
 
 
 def test_build_bot_with_proxy_attaches_proxied_session() -> None:

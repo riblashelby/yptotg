@@ -5,6 +5,7 @@ Run with:  python bot.py   (configuration comes from .env only)
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import socket
@@ -29,15 +30,42 @@ from middleware import AdminOnlyMiddleware
 log = logging.getLogger("study-bot")
 
 
+def _socks_connector_init(proxy_url: str) -> dict[str, Any]:
+    """Build ProxyConnector kwargs the way aiogram itself does internally.
+
+    ``ProxyConnector`` has NO ``url=`` parameter — it needs
+    ``proxy_type/host/port/username/password/rdns``. Handing it ``{"url": ...}``
+    is what produced ``missing 2 required positional arguments: 'host' and 'port'``.
+    """
+    from aiohttp_socks.utils import parse_proxy_url
+
+    proxy_type, host, port, username, password = parse_proxy_url(proxy_url)
+    try:  # literal IP → resolve locally (rdns=False); hostname → resolve at the proxy (rdns=True)
+        ipaddress.ip_address(host)
+        rdns = False
+    except ValueError:
+        rdns = True
+    return {
+        "proxy_type": proxy_type,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "rdns": rdns,
+    }
+
+
 class ProxiedSession(AiohttpSession):
     """AiohttpSession forced onto a SOCKS5/HTTP proxy connector.
 
-    Passing ``connector=`` to the constructor is forbidden by aiogram
-    (``BaseSession.__init__() got an unexpected keyword argument 'connector'``
-    — the crash that killed earlier deployments). The supported extension
-    point: rewrite ``_connector_type/_connector_init`` *after* construction —
-    exactly what aiogram's own ``proxy=`` kwarg does internally, but version-
-    proof on every aiogram 3.x build.
+    Two forbidden approaches that killed earlier deployments:
+      * ``connector=`` as a constructor kwarg → ``BaseSession.__init__() got
+        an unexpected keyword argument 'connector'``;
+      * ``_connector_init = {"url": ...}`` → ``ProxyConnector.__init__()
+        missing 'host' and 'port'``.
+    The supported extension point: rewrite ``_connector_type/_connector_init``
+    *after* construction with properly parsed kwargs — version-proof on every
+    aiogram 3.x build.
     """
 
     def __init__(self, proxy_url: str, **kwargs: Any) -> None:
@@ -45,7 +73,7 @@ class ProxiedSession(AiohttpSession):
         from aiohttp_socks import ProxyConnector
 
         self._connector_type = ProxyConnector
-        self._connector_init = {"url": proxy_url}
+        self._connector_init = _socks_connector_init(proxy_url)
         self._should_reset_connector = True
 
 

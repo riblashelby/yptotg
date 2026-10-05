@@ -57,7 +57,14 @@ async def test_manage_keyboard_offers_add_and_rename(live_bot):
     callback = make_callback(live_bot, "subjects")
     await handlers.cb_subjects(callback)
     buttons = [b.text for row in live_bot.recorder.calls[-1][2]["reply_markup"].inline_keyboard for b in row]
-    assert {"➕ Add subject", "✏️ Rename subject", "🎓 Study now"} <= set(buttons)
+    assert {"➕ Add subject", "✏️ Rename subject"} <= set(buttons)
+
+
+async def test_main_menu_lists_all_subjects_plus_manage(live_bot):
+    """The /start grid: every registry subject + the management entry point."""
+    await handlers.cmd_start(make_message(live_bot, text="/start"))
+    buttons = [b.text for row in live_bot.calls[0][2]["reply_markup"].inline_keyboard for b in row]
+    assert {"Math", "Code", "Reading", "🏷 Manage subjects"} <= set(buttons)
 
 
 async def test_rename_picker_shows_current_subjects(live_bot):
