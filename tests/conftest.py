@@ -103,6 +103,10 @@ class RecordingMessage(TelegramTestMixin, Message):
         self._recorder.record("edit_text", text, **kwargs)
         return self
 
+    async def edit_reply_markup(self, **kwargs: Any) -> "RecordingMessage":
+        self._recorder.record("edit_reply_markup", **kwargs)
+        return self
+
 
 class RecordingCallback(TelegramTestMixin, CallbackQuery):
     """CallbackQuery whose answer responses are recorded."""

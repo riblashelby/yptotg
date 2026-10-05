@@ -10,6 +10,13 @@ import handlers
 from tests.conftest import ADMIN_ID, OTHER_ID, make_callback, make_message
 
 
+async def sub_id(bot, name: str) -> int:
+    """Subject id by name from the seeded registry."""
+    found = await db_api.find_subject(bot.db, name)
+    assert found is not None
+    return found[0]
+
+
 # --------------------------------------------------------------------------- /start
 async def test_start_shows_subject_keyboard(live_bot):
     message = make_message(live_bot)
@@ -25,8 +32,9 @@ async def test_start_shows_subject_keyboard(live_bot):
 
 
 async def test_start_resumes_existing_session(live_bot):
-    sid = await db_api.create_session(live_bot.db, "Math", time.time() - 120)
-    await db_api.start_active(live_bot.db, ADMIN_ID, sid, "Math", time.time() - 120)
+    mid = await sub_id(live_bot, "Math")
+    sid = await db_api.create_session(live_bot.db, mid, time.time() - 120)
+    await db_api.start_active(live_bot.db, ADMIN_ID, sid, mid, time.time() - 120)
 
     await handlers.cmd_start(make_message(live_bot))
 
@@ -36,7 +44,7 @@ async def test_start_resumes_existing_session(live_bot):
 
 # --------------------------------------------------------------------------- start callback
 async def test_cb_start_creates_session_and_active_row(live_bot):
-    callback = make_callback(live_bot, "start:Math")
+    callback = make_callback(live_bot, f"start:{await sub_id(live_bot, 'Math')}")
     await handlers.cb_start(callback)
 
     active = await db_api.get_active(live_bot.db, ADMIN_ID)
@@ -53,10 +61,11 @@ async def test_cb_start_creates_session_and_active_row(live_bot):
 
 async def test_cb_start_switches_subject_and_keeps_old_time(live_bot):
     now = time.time()
-    old_sid = await db_api.create_session(live_bot.db, "Math", now - 600)
-    await db_api.start_active(live_bot.db, ADMIN_ID, old_sid, "Math", now - 600)
+    mid = await sub_id(live_bot, "Math")
+    old_sid = await db_api.create_session(live_bot.db, mid, now - 600)
+    await db_api.start_active(live_bot.db, ADMIN_ID, old_sid, mid, now - 600)
 
-    await handlers.cb_start(make_callback(live_bot, "start:Code"))
+    await handlers.cb_start(make_callback(live_bot, f"start:{await sub_id(live_bot, 'Code')}"))
 
     active = await db_api.get_active(live_bot.db, ADMIN_ID)
     assert active["subject"] == "Code"
@@ -68,8 +77,9 @@ async def test_cb_start_switches_subject_and_keeps_old_time(live_bot):
 # --------------------------------------------------------------------------- pause
 async def test_pause_then_resume_accumulates_only_paused_time(live_bot, monkeypatch):
     now = time.time()
-    sid = await db_api.create_session(live_bot.db, "Math", now - 1000)
-    await db_api.start_active(live_bot.db, ADMIN_ID, sid, "Math", now - 1000)
+    mid = await sub_id(live_bot, "Math")
+    sid = await db_api.create_session(live_bot.db, mid, now - 1000)
+    await db_api.start_active(live_bot.db, ADMIN_ID, sid, mid, now - 1000)
 
     clock = {"t": now}
     monkeypatch.setattr(time, "time", lambda: clock["t"])
@@ -97,8 +107,9 @@ async def test_pause_without_session_alerts(live_bot):
 # --------------------------------------------------------------------------- stop
 async def test_stop_logs_net_seconds_and_clears_active(live_bot):
     now = time.time()
-    sid = await db_api.create_session(live_bot.db, "Reading", now - 1000)
-    await db_api.start_active(live_bot.db, ADMIN_ID, sid, "Reading", now - 1000)
+    rid = await sub_id(live_bot, "Reading")
+    sid = await db_api.create_session(live_bot.db, rid, now - 1000)
+    await db_api.start_active(live_bot.db, ADMIN_ID, sid, rid, now - 1000)
     # `accrued` is TOTAL paused seconds; handler subtracts wall-clock (1000) minus
     # accrued pause (400) -> net 600.
     await db_api.set_paused(live_bot.db, ADMIN_ID, None, 400)

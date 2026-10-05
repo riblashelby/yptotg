@@ -14,6 +14,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 from aiohttp_socks import ProxyConnector
 
 import database as db_api
@@ -91,7 +92,12 @@ async def main() -> None:
     dp.update.outer_middleware(AdminOnlyMiddleware(settings.admin_id))
     dp.include_router(router)
 
-    await bot.set_my_commands([])
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Start focusing"),
+        BotCommand(command="subjects", description="Add / rename subjects"),
+        BotCommand(command="addsubject", description="Add a subject: /addsubject Physics"),
+        BotCommand(command="renamesubject", description="Rename: /renamesubject <id> <New Name>"),
+    ])
     log.info("Study bot online for admin %s", settings.admin_id)
 
     report_task = asyncio.create_task(daily_report_loop(bot, db, settings))

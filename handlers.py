@@ -4,22 +4,35 @@ from __future__ import annotations
 import time
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import database as db_api
 import logic
-from config import DEFAULT_TIMER_CONFIG, TimerConfig
 
 router = Router()
 
 
-def subject_keyboard(timer_config: TimerConfig = DEFAULT_TIMER_CONFIG) -> InlineKeyboardMarkup:
+# ---------------------------------------------------------------------------
+# Keyboards (built from the live subjects table — add/rename reflects instantly)
+# ---------------------------------------------------------------------------
+def subject_keyboard(subjects: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    by_id = dict(subjects)
     rows = [
-        [InlineKeyboardButton(text=name, callback_data=f"start:{name}") for name in group]
-        for group in zip(timer_config.subjects[::2], timer_config.subjects[1::2], strict=False)
+        [InlineKeyboardButton(text=by_id[sid], callback_data=f"start:{sid}") for sid in group]
+        for group in logic.keyboard_grid(list(by_id), per_row=2)
     ]
+    rows.append([InlineKeyboardButton(text="🏷 Manage subjects", callback_data="subjects")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+MANAGE_KEYBOARD = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Add subject", callback_data="subject:add")],
+        [InlineKeyboardButton(text="✏️ Rename subject", callback_data="subject:rename")],
+        [InlineKeyboardButton(text="🎓 Study now", callback_data="subjects:back")],
+    ]
+)
 
 
 CONTROL_KEYBOARD = InlineKeyboardMarkup(
@@ -38,6 +51,11 @@ def _timer_text(active: dict, now: float) -> str:
     return logic.render_status(active["subject"], seconds, paused)
 
 
+async def _subjects_markup(message_or_callback: Message | CallbackQuery) -> InlineKeyboardMarkup:
+    conn = message_or_callback.bot.db
+    return subject_keyboard(await db_api.list_subjects(conn))
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -49,8 +67,43 @@ async def cmd_start(message: Message) -> None:
         return
     await message.answer(
         "🎓 <b>Study Timer</b>\n\nPick a subject to start focusing 👇",
-        reply_markup=subject_keyboard(),
+        reply_markup=await _subjects_markup(message),
     )
+
+
+@router.message(Command("subjects"))
+async def cmd_subjects(message: Message) -> None:
+    await message.answer("🏷 <b>Subjects</b>", reply_markup=MANAGE_KEYBOARD)
+
+
+@router.message(Command("addsubject"))
+async def cmd_add_subject(message: Message) -> None:
+    name = (message.text or "").partition(" ")[2].strip()
+    if not name:
+        await message.answer("Usage: /addsubject <New Subject>")
+        return
+    try:
+        subject_id, clean = await db_api.add_subject(message.bot.db, name)
+    except ValueError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await message.answer(f"✅ Added <b>{clean}</b> (#{subject_id}). It's on your keyboard now 🎓")
+
+
+@router.message(Command("renamesubject"))
+async def cmd_rename_subject(message: Message) -> None:
+    arg = (message.text or "").partition(" ")[2].strip()
+    subjects = await db_api.list_subjects(message.bot.db)
+    raw_id, payload = logic.rename_prompt(arg, subjects)
+    if not raw_id:
+        await message.answer(payload)
+        return
+    try:
+        _, clean = await db_api.rename_subject(message.bot.db, int(raw_id), payload)
+    except ValueError as exc:
+        await message.answer(f"⚠️ {exc}")
+        return
+    await message.answer(f"✅ Renamed to <b>{clean}</b> — history kept 📊")
 
 
 @router.message(F.text, ~F.text.startswith("/"))
@@ -59,22 +112,32 @@ async def cmd_fallback(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Callbacks
+# Session callbacks
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("start:"))
 async def cb_start(callback: CallbackQuery) -> None:
-    subject = callback.data.split(":", 1)[1]
+    raw_id = callback.data.split(":", 1)[1]
+    subject = await db_api.get_subject(callback.bot.db, int(raw_id))
+    if subject is None:
+        await callback.answer("Subject was removed — pick another 🙃", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=await _subjects_markup(callback))
+        return
+    subject_id, name = subject
+
     now = time.time()
     conn = callback.bot.db
     existing = await db_api.get_active(conn, callback.from_user.id)
     if existing:  # switch subject without losing logged time
-        await db_api.finish_session(conn, existing["session_id"], now)
+        accrued = existing["paused_sec"] + (
+            now - existing["paused_at"] if existing["paused_at"] else 0.0
+        )
+        await db_api.finish_session(conn, existing["session_id"], now, accrued)
         await db_api.clear_active(conn, callback.from_user.id)
 
-    session_id = await db_api.create_session(conn, subject, now)
-    await db_api.start_active(conn, callback.from_user.id, session_id, subject, now)
+    session_id = await db_api.create_session(conn, subject_id, now)
+    await db_api.start_active(conn, callback.from_user.id, session_id, subject_id, now)
     await callback.message.edit_text(
-        logic.render_status(subject, 0.0, paused=False), reply_markup=CONTROL_KEYBOARD
+        logic.render_status(name, 0.0, paused=False), reply_markup=CONTROL_KEYBOARD
     )
     await callback.answer()
 
@@ -111,5 +174,61 @@ async def cb_stop(callback: CallbackQuery) -> None:
         f"✅ <b>Session complete!</b>\n\n"
         f"📚 {active['subject']} · <b>{logic.format_duration(seconds)}</b> logged\n\n"
         f"New round? /start 🚀"
+    )
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Subject-management callbacks
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "subjects")
+async def cb_subjects(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("🏷 <b>Manage subjects</b>", reply_markup=MANAGE_KEYBOARD)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subjects:back")
+async def cb_subjects_back(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "🎓 <b>Study Timer</b>\n\nPick a subject to start focusing 👇",
+        reply_markup=await _subjects_markup(callback),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subject:add")
+async def cb_subject_add(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "➕ Send me the new subject name as a command:\n\n"
+        "<code>/addsubject Physics</code>"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "subject:rename")
+async def cb_subject_rename(callback: CallbackQuery) -> None:
+    subjects = await db_api.list_subjects(callback.bot.db)
+    rows = [
+        [InlineKeyboardButton(text=name, callback_data=f"renamepick:{sid}")]
+        for sid, name in subjects
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="subjects")])
+    await callback.message.edit_text(
+        "✏️ Pick the subject to rename:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("renamepick:"))
+async def cb_rename_pick(callback: CallbackQuery) -> None:
+    subject_id = int(callback.data.split(":", 1)[1])
+    subject = await db_api.get_subject(callback.bot.db, subject_id)
+    if subject is None:
+        await callback.answer("Subject vanished 🤷", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"✏️ Renaming <b>{subject[1]}</b> (#{subject_id}).\n\n"
+        "Send:\n"
+        f"<code>/renamesubject {subject_id} New Name</code>"
     )
     await callback.answer()

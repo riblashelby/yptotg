@@ -61,6 +61,40 @@ def progress_bar(fraction: float, width: int = 8) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Subject-management UX (pure — no DB access here)
+# ---------------------------------------------------------------------------
+def parse_subject_command(text: str) -> tuple[str, str] | None:
+    """'/addsubject Physics' -> ('add', 'Physics'); '/renamesubject 3 Physics' -> ('rename', '3 Physics')."""
+    for prefix, action in (("/addsubject", "add"), ("/renamesubject", "rename")):
+        if text.lower().startswith(prefix):
+            return action, text[len(prefix):].strip()
+    return None
+
+
+def keyboard_grid(names: list[str], per_row: int = 2) -> list[list[str]]:
+    """Names chunked into keyboard rows."""
+    return [names[i : i + per_row] for i in range(0, len(names), per_row)]
+
+
+def rename_prompt(arg: str, subjects: list[tuple[int, str]]) -> tuple[str, str]:
+    """Resolve '/renamesubject 3 Physics' against the registry.
+
+    Returns (subject_id_str, new_name) on success, or ('', error_message).
+    """
+    parts = arg.split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        listing = "\n".join(f"  #{sid} · {name}" for sid, name in subjects)
+        hint = "Usage: /renamesubject <id> <New Name>"
+        return "", f"{hint}\n\n{listing}" if listing else hint
+    subject_id = int(parts[0])
+    if len(parts) < 2 or not parts[1].strip():
+        return "", f"⚠️ New name missing. Usage: /renamesubject {subject_id} <New Name>"
+    if subject_id not in {sid for sid, _ in subjects}:
+        return "", f"⚠️ No subject with id {subject_id}. Check /subjects"
+    return str(subject_id), parts[1]
+
+
+# ---------------------------------------------------------------------------
 # Report rendering
 # ---------------------------------------------------------------------------
 def render_daily_report(day_totals: dict[str, float], day: date) -> str:
