@@ -1,0 +1,6 @@
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Testing artifacts
+.pytest_cache/
