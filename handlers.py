@@ -103,7 +103,9 @@ async def cb_stop(callback: CallbackQuery) -> None:
         return
     now = time.time()
     seconds = logic.elapsed_seconds(active["started_at"], now, active["paused_sec"], active["paused_at"])
-    await db_api.finish_session(conn, active["session_id"], now)
+    # Persist the accrued pause too, otherwise paused time inflates the stored total.
+    accrued = active["paused_sec"] + (now - active["paused_at"] if active["paused_at"] else 0.0)
+    await db_api.finish_session(conn, active["session_id"], now, accrued)
     await db_api.clear_active(conn, callback.from_user.id)
     await callback.message.edit_text(
         f"✅ <b>Session complete!</b>\n\n"

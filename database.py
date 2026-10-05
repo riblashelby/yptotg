@@ -54,10 +54,11 @@ async def create_session(db: Any, subject: str, start_ts: float) -> int:
     return int(cursor.lastrowid)
 
 
-async def finish_session(db: Any, session_id: int, end_ts: float) -> None:
-    """Stamp the end time; net study time is derived as end_ts - start_ts - paused_sec."""
+async def finish_session(db: Any, session_id: int, end_ts: float, paused_sec: float = 0.0) -> None:
+    """Stamp the end time AND the accrued pause; net time = end_ts - start_ts - paused_sec."""
     await db.execute(
-        "UPDATE sessions SET end_ts = ? WHERE id = ?", (end_ts, session_id)
+        "UPDATE sessions SET end_ts = ?, paused_sec = ? WHERE id = ?",
+        (end_ts, paused_sec, session_id),
     )
     await db.commit()
 

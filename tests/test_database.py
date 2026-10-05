@@ -49,7 +49,8 @@ async def test_get_day_totals_subtracts_paused_time(db):
     now = time.time()
     sid = await db_api.create_session(db, "Reading", now - 1000)
     await db.execute("UPDATE sessions SET paused_sec = 400 WHERE id = ?", (sid,))
-    await db_api.finish_session(db, sid, now)
+    await db.commit()
+    await db_api.finish_session(db, sid, now, paused_sec=400)  # stop flow persists accrued pause
 
     totals = await db_api.get_day_totals(db, date.today())
     assert totals["Reading"] == pytest.approx(600.0)
