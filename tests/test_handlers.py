@@ -15,7 +15,10 @@ async def test_start_shows_subject_keyboard(live_bot):
     message = make_message(live_bot)
     await handlers.cmd_start(message)
 
-    (_, text), kwargs = live_bot.calls[0][1], live_bot.calls[0][2]
+    # RecordingMessage.answer() lands in the recorder, not MockBot.calls
+    kind, args, kwargs = live_bot.recorder.calls[0]
+    assert kind == "answer"
+    (text,) = args[:1]
     assert "Study Timer" in text
     buttons = [b.text for row in kwargs["reply_markup"].inline_keyboard for b in row]
     assert "Math" in buttons and "Code" in buttons
@@ -96,7 +99,9 @@ async def test_stop_logs_net_seconds_and_clears_active(live_bot):
     now = time.time()
     sid = await db_api.create_session(live_bot.db, "Reading", now - 1000)
     await db_api.start_active(live_bot.db, ADMIN_ID, sid, "Reading", now - 1000)
-    await db_api.set_paused(live_bot.db, ADMIN_ID, None, 400)  # 400s accrued pause
+    # `accrued` is TOTAL paused seconds; handler subtracts wall-clock (1000) minus
+    # accrued pause (400) -> net 600.
+    await db_api.set_paused(live_bot.db, ADMIN_ID, None, 400)
 
     await handlers.cb_stop(make_callback(live_bot, "stop"))
 
@@ -104,8 +109,8 @@ async def test_stop_logs_net_seconds_and_clears_active(live_bot):
     totals = await db_api.get_day_totals(live_bot.db, __import__("datetime").date.today())
     assert totals["Reading"] == pytest.approx(600.0, abs=2)
 
-    (text,), _ = live_bot.calls[0][1], live_bot.calls[0][2]
-    assert "Session complete" in text and "Reading" in text
+    kind, args, _ = live_bot.recorder.calls[0]  # edit_text on the timer card
+    assert kind == "edit_text" and "Session complete" in args[0] and "Reading" in args[0]
 
 
 async def test_stop_without_session_is_safe(live_bot):

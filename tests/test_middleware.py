@@ -7,7 +7,6 @@ from aiogram.types import Update
 from middleware import AdminOnlyMiddleware
 from tests.conftest import ADMIN_ID, OTHER_ID, make_message, make_user
 
-pytestmark = pytest.mark.asyncio
 
 
 async def _pass_handler(event, data):

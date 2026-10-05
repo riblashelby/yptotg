@@ -11,8 +11,8 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
-from aiohttp_socks import ProxyConnector
 
 import database as db_api
 import logic
@@ -23,16 +23,43 @@ from middleware import AdminOnlyMiddleware
 log = logging.getLogger("study-bot")
 
 
+def build_session(proxy_url: str) -> BaseSession:
+    """SOCKS5/HTTP session factory — version-proof across aiogram 3.x builds.
+
+    * aiogram >= 3.15: native ``proxy=`` kwarg (bundles aiohttp-socks).
+    * aiogram 3.7–3.14: legacy ``proxy=`` tuple kwarg.
+    * otherwise: subclass ``AiohttpSession`` and inject an
+      ``aiohttp_socks.ProxyConnector`` via the ``create_connector`` override.
+
+    Never pass ``connector=`` to the constructor: ``BaseSession.__init__``
+    rejects it (TypeError) — that exact crash killed previous deployments.
+    """
+    from aiogram.client.session.aiohttp import AiohttpSession
+
+    for attempt in (
+        lambda: AiohttpSession(proxy=proxy_url),          # modern: string proxy
+        lambda: AiohttpSession(proxy=("socks5", proxy_url)),  # legacy tuple form
+    ):
+        try:
+            return attempt()
+        except TypeError:
+            continue
+
+    from aiohttp_socks import ProxyConnector  # pragma: no cover - fallback path
+
+    class _SocksSession(AiohttpSession):
+        async def create_connector(self) -> ProxyConnector:  # type: ignore[override]
+            return ProxyConnector.from_url(proxy_url)
+
+    return _SocksSession()
+
+
 def build_bot(settings: Settings) -> Bot:
-    """Bot factory — SOCKS5 wired via a custom aiohttp connector when configured."""
+    """Bot factory — proxy wired only when ``PROXY_URL`` is set."""
     kwargs: dict[str, Any] = {"default": DefaultBotProperties(parse_mode=ParseMode.HTML)}
     if settings.proxy_url:
         log.info("Using proxy: %s", settings.proxy_url.split("@")[-1])
-        from aiogram.client.session.aiohttp import AiohttpSession
-
-        kwargs["session"] = AiohttpSession(
-            connector=ProxyConnector.from_url(settings.proxy_url)
-        )
+        kwargs["session"] = build_session(settings.proxy_url)
     return Bot(token=settings.bot_token, **kwargs)
 
 

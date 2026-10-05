@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: study-timer
+    restart: unless-stopped
+    env_file: .env                       # single source of truth
+    environment:                         # force DB + TZ inside the container
+      DB_PATH: /data/study_timer.db
+      TZ: ${TZ:-UTC}                     # keeps REPORT_TIME local-time accurate
+      # NOTE: do NOT set HTTP_PROXY/HTTPS_PROXY here — generic proxy env vars
+      # are ignored by aiogram's SOCKS5 wiring and can break other tooling.
+      # The bot reads exactly one var from .env: PROXY_URL (e.g. socks5://xray-proxy:1080)
+    volumes:
+      - bot_data:/data                   # aiosqlite file survives rebuilds
+
+volumes:
+  bot_data:

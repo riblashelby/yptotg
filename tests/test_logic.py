@@ -77,9 +77,9 @@ def test_render_daily_report_with_data():
 
     assert "Daily Study Report" in report
     assert "Monday, 05 October 2026" in report
-    assert "2h 00m" in report          # total
+    assert "3h 00m" in report            # total (2h + 1h)
     assert "Math" in report and "Code" in report
-    assert "50%" in report             # shares
+    assert "67%" in report and "33%" in report   # shares of the 3h total
     assert report.index("Code") < report.index("Math")  # sorted by time desc
 
 
