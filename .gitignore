@@ -1,7 +1,5 @@
-# Python bytecode and cache
 __pycache__/
 *.pyc
-
-# Environment variables
+.pytest_cache/
 .env
-.env.local
+*.db
