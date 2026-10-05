@@ -1,6 +1,8 @@
 """Regression tests for SOCKS5 wiring — the `connector=` TypeError crash class."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import bot as bot_module
@@ -14,10 +16,19 @@ def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **base)  # type: ignore[call-arg]
 
 
-def test_build_session_uses_native_proxy_kwarg() -> None:
-    """aiogram >=3.15 accepts `proxy=`; we must use it, never `connector=`."""
+def test_build_session_uses_connector_override() -> None:
+    """Session must inject the SOCKS connector via create_connector(), never a kwarg."""
+    from aiohttp_socks import ProxyConnector
+
     session = bot_module.build_session(PROXY)
-    assert type(session).__name__ == "AiohttpSession"
+    assert isinstance(session, bot_module.ProxiedSession)
+    connector = asyncio.run(session.create_connector())
+    assert isinstance(connector, ProxyConnector)
+
+
+def test_build_bot_with_proxy_attaches_proxied_session() -> None:
+    b = bot_module.build_bot(_settings(proxy_url=PROXY))
+    assert isinstance(b.session, bot_module.ProxiedSession)
 
 
 def test_build_session_never_passes_connector_kwarg() -> None:
@@ -35,8 +46,4 @@ def test_build_bot_without_proxy_has_default_session() -> None:
 
     b = bot_module.build_bot(_settings(proxy_url=None))
     assert isinstance(b.session, AiohttpSession)
-
-
-def test_build_bot_with_proxy_attaches_session() -> None:
-    b = bot_module.build_bot(_settings(proxy_url=PROXY))
-    assert type(b.session).__name__ == "AiohttpSession"
+    assert not isinstance(b.session, bot_module.ProxiedSession)
